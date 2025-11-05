@@ -1,9 +1,12 @@
 from celery import shared_task
 from django.core.cache import cache
 from django.db import transaction
+from django.contrib.auth import get_user_model
 from .models import Book
 from .services import generate_and_cache_ai_summary
-from .recommender import generate_book_embedding
+from .recommender import generate_book_embedding, _compute_recommendations_for_user
+
+User = get_user_model()
 
 
 # ===========================================================
@@ -12,55 +15,52 @@ from .recommender import generate_book_embedding
 @shared_task(bind=True, max_retries=3)
 def generate_summary_task(self, google_id):
     """Celery task to generate and cache AI summary for a book."""
-    print(f"🚀 Starting summary generation for book {google_id}...")
+    print(f"🚀 [Celery] Starting summary generation for book {google_id}...")
 
     try:
         summary = generate_and_cache_ai_summary(google_id)
         if summary:
             cache.set(f"book_summary_gemini_{google_id}", summary, 60 * 60 * 24)
-
             try:
                 book = Book.objects.get(google_id=google_id)
                 book.ai_summary = summary
                 book.save(update_fields=["ai_summary"])
-                print(f"✅ Summary saved for {book.title}")
+                print(f"✅ [Celery] Summary saved for '{book.title}' ({google_id})")
             except Book.DoesNotExist:
-                print(f"⚠️ Book {google_id} not found while saving summary.")
+                print(f"⚠️ [Celery] Book {google_id} not found while saving summary.")
         else:
-            print(f"⚠️ No summary generated for {google_id}.")
+            print(f"⚠️ [Celery] No summary generated for {google_id}.")
     except Exception as e:
-        print(f"🔥 Celery task error for {google_id}: {e}")
-        self.retry(exc=e, countdown=10)
+        print(f"🔥 [Celery] Error in summary generation for {google_id}: {e}")
+        self.retry(exc=e, countdown=15)
 
 
 # ===========================================================
-# 🧩 Embedding Generation Task
+# 🧩 Embedding Generation Task (OpenAI + Gemini Fallback)
 # ===========================================================
 @shared_task(bind=True, max_retries=2)
 def generate_book_embedding_task(self, google_id):
-    """Generate and store the vector embedding for a given book asynchronously."""
-    print(f"🧩 Generating embedding for book {google_id}...")
+    """Generate and store vector embedding for a given book asynchronously."""
+    print(f"🧩 [Celery] Generating embedding for book {google_id}...")
 
     try:
         book = Book.objects.get(google_id=google_id)
-        if book.embedding:
-            print(f"✅ Embedding already exists for {book.title}")
-            return
+    except Book.DoesNotExist:
+        print(f"❌ [Celery] Book {google_id} not found for embedding generation.")
+        return
 
+    try:
         vector = generate_book_embedding(book)
         if vector:
             with transaction.atomic():
                 book.embedding = vector
                 book.save(update_fields=["embedding"])
                 cache.set(f"book_embedding_{google_id}", vector, 60 * 60 * 24 * 7)
-                print(f"✅ Saved embedding for {book.title}")
+                print(f"✅ [Celery] Embedding saved for '{book.title}' ({google_id})")
         else:
-            print(f"⚠️ No embedding generated for {google_id}")
-
-    except Book.DoesNotExist:
-        print(f"❌ Book {google_id} not found for embedding generation.")
+            print(f"⚠️ [Celery] Embedding not generated for {google_id}. Possibly API key or quota issue.")
     except Exception as e:
-        print(f"🔥 Embedding generation failed for {google_id}: {e}")
+        print(f"🔥 [Celery] Embedding generation failed for {google_id}: {e}")
         self.retry(exc=e, countdown=30)
 
 
@@ -69,23 +69,37 @@ def generate_book_embedding_task(self, google_id):
 # ===========================================================
 @shared_task(bind=True, max_retries=2)
 def generate_recommendations_task(self, user_id, top_n=10):
-    from django.contrib.auth import get_user_model
-    from .recommender import _compute_recommendations
-    from django.core.cache import cache
-
-    User = get_user_model()
+    """
+    Compute recommendations for a user and cache their google_ids.
+    Adds detailed debug logs to show whether OpenAI, Gemini, or heuristics were used.
+    """
     try:
         user = User.objects.get(id=user_id)
     except User.DoesNotExist:
-        print(f"⚠️ User {user_id} not found for recommendation generation.")
-        return
+        print(f"❌ [Celery] User {user_id} not found for recommendations.")
+        return []
 
-    print(f"🎯 Generating recommendations for {user.email} ...")
-    recs = _compute_recommendations(user, top_n)
+    print(f"🎯 [Celery] Generating recommendations for {user.email}...")
 
-    # ✅ Store only book IDs in Redis cache
-    book_ids = [b.google_id for b in recs]
-    cache.set(f"user_recommendations_{user.id}", book_ids, timeout=60 * 60 * 6)
+    try:
+        top_ids = _compute_recommendations_for_user(user, top_n=top_n)
 
-    print(f"✅ Recommendations cached for {user.email}")
-    return book_ids
+        cache_key = f"user_recommendations_{user.id}"
+        cache.set(cache_key, top_ids, timeout=60 * 60 * 6)  # 6 hours
+
+        # --- Smart Log Context ---
+        used_embeddings = any(
+            Book.objects.filter(google_id=i, embedding__isnull=False).exists()
+            for i in top_ids
+        )
+        if not used_embeddings:
+            log_source = "HEURISTIC fallback (author/genre)"
+        else:
+            log_source = "OpenAI/Gemini embeddings"
+
+        print(f"✅ [Celery] Recommendations cached for {user.email} ({len(top_ids)} items). Source: {log_source}")
+        return top_ids
+
+    except Exception as exc:
+        print(f"🔥 [Celery] Recommendation generation failed for {user.email}: {exc}")
+        raise self.retry(exc=exc, countdown=60)

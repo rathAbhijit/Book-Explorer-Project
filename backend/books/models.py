@@ -3,6 +3,9 @@ from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 
 
+# ============================================================
+# 🔹 Book Model
+# ============================================================
 class Book(models.Model):
     google_id = models.CharField(max_length=100, unique=True, primary_key=True)
     title = models.CharField(max_length=255)
@@ -14,12 +17,21 @@ class Book(models.Model):
     short_description = models.TextField(null=True, blank=True)
     ai_summary = models.TextField(null=True, blank=True)
     average_rating = models.FloatField(null=True, blank=True)
+
+    # 🔹 Persistent vector embedding for recommendations
     embedding = models.JSONField(null=True, blank=True)
 
     def __str__(self):
         return self.title
 
+    def has_embedding(self):
+        """Check if this book has an embedding stored."""
+        return bool(self.embedding)
 
+
+# ============================================================
+# 🔹 User ↔ Book Interaction Model
+# ============================================================
 class UserBookInteraction(models.Model):
     class Status(models.TextChoices):
         WANT_TO_READ = "WTR", "Want to Read"
@@ -39,9 +51,12 @@ class UserBookInteraction(models.Model):
         unique_together = ("user", "book")
 
     def __str__(self):
-        return f"{self.user.name} - {self.book.title}"
+        return f"{self.user.name or self.user.email} - {self.book.title}"
 
 
+# ============================================================
+# 🔹 Review Model
+# ============================================================
 class Review(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -57,7 +72,12 @@ class Review(models.Model):
 
     class Meta:
         unique_together = ("user", "book")
+        ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Review for {self.book.title} by {self.user.name}"
+        return f"Review for {self.book.title} by {self.user.name or self.user.email}"
 
+    @property
+    def short_comment(self):
+        """Return first 80 chars for previews."""
+        return (self.comment[:80] + "...") if self.comment and len(self.comment) > 80 else self.comment

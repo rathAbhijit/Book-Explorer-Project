@@ -488,3 +488,4 @@ def clear_book_detail_cache(book_id, user_id=None):
     cache.delete(f"book_full_detail_{book_id}_anon")
     if user_id:
         cache.delete(f"book_full_detail_{book_id}_{user_id}")
+

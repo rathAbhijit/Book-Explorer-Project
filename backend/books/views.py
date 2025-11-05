@@ -8,6 +8,7 @@ from .models import Book, UserBookInteraction, Review
 from .recommender import get_user_recommendations
 from django.conf import settings
 from django.db.models import Avg
+from .tasks import generate_recommendations_task
 from .serializers import (
     BookSerializer,
     UserBookInteractionSerializer,
@@ -311,22 +312,26 @@ class UserFavoritesView(APIView):
         serializer = UserBookInteractionSerializer(favorites, many=True)
         return Response({"favorites": serializer.data})
 
+
 class RecommendationView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        try:
-            recs = get_user_recommendations(request.user)
-            serializer = BookSerializer(recs, many=True, context={"request": request})
+        # Check if ready in-service
+        result = get_user_recommendations(request.user, top_n=10)
+        if result["status"] == "ready":
+            serializer = BookSerializer(result["books"], many=True, context={"request": request})
             return Response({"status": "ready", "recommendations": serializer.data}, status=200)
-        except Exception as e:
-            # If recommendations are still being generated or embeddings missing
-            return Response({
-                "status": "processing",
-                "message": str(e)
-            }, status=202)
 
-
+        # Not ready -> start async task (safe to call multiple times)
+        task = generate_recommendations_task.delay(request.user.id, 10)
+        return Response({
+            "status": "processing",
+            "message": "Recommendation generation started. Retry this endpoint in a few seconds.",
+            "task_id": task.id
+        }, status=202)
+    
+    
 # ============================================================
 # 🔹 Author Endpoints
 # ============================================================

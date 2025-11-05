@@ -37,6 +37,7 @@ urlpatterns = [
     path("delete-review/<str:google_id>/", DeleteReviewView.as_view(), name="delete-review"),
     path("recommendations/", RecommendationView.as_view(), name="recommendations"),
 
+
     # Author-related endpoints
     path("author/<str:author_name>/", AuthorDetailView.as_view(), name="author-detail"),
     path("books/more-from-author/<str:author_name>/", MoreFromAuthorView.as_view(), name="more-from-author"),

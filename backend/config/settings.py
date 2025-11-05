@@ -126,15 +126,20 @@ APPEND_SLASH = False
 GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-NYT_BOOKS_API_KEY = os.getenv("NYT_BOOKS_API_KEY")
+NYT_API_KEY = os.getenv("NYT_API_KEY")
 # CORS Settings
 # NOTE: For production, use CORS_ALLOWED_ORIGINS instead of allowing all.
-CORS_ALLOW_ALL_ORIGINS = True
-# CORS_ALLOWED_ORIGINS = [
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-# ]
-
+#
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:5173"
+]
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = False  # True if using HTTPS
+CSRF_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = False
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",

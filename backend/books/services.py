@@ -78,19 +78,39 @@ def fetch_google_book_by_id(google_id):
         print(f"Google Books API Error fetching ID {google_id}: {e}")
         return None
 
-def get_nyt_bestsellers(list_name="hardcover-fiction", limit=10):
-    """Get NYT bestseller list."""
-    # ... (rest of function is fine)
-    url = f"https://api.nytimes.com/svc/books/v3/lists/current/{list_name}.json"
-    params = {"api-key": getattr(settings, "NYT_BOOKS_API_KEY", None)}
+
+def get_nyt_bestsellers():
+    """Fetch bestseller list from NYT API if valid key is available."""
+    api_key = getattr(settings, "NYT_API_KEY", None)
+    if not api_key:
+        print("⚠️ NYT_API_KEY not set — skipping NYT bestseller fetch.")
+        return []
+
+    url = "https://api.nytimes.com/svc/books/v3/lists/current/hardcover-fiction.json"
+    params = {"api-key": api_key}
     try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json().get("results", {}).get("books", [])
+        return [
+            {
+                "title": b.get("title"),
+                "authors": [b.get("author")] if b.get("author") else [],
+                "thumbnail": b.get("book_image"),
+                "description": b.get("description"),
+                "rank": b.get("rank"),
+                "amazon_url": b.get("amazon_product_url"),
+            }
+            for b in data
+        ]
+    except requests.exceptions.HTTPError as e:
         print(f"NYT API Error: {e}")
         return []
-    data = response.json()
-    return data.get("results", {}).get("books", [])[:limit]
+    except Exception as e:
+        print(f"NYT Bestseller Fetch Error: {e}")
+        return []
+    
+
 
 # -------------------------------
 # Normalizers (Google + NYT)
@@ -193,15 +213,52 @@ def get_recent_books(limit=10):
 
 # ADDED: Caching for performance
 def get_bestsellers(limit=10):
-    """Get bestseller books (NYT), with caching."""
-    cache_key = "bestsellers"
-    cached_books = cache.get(cache_key)
-    if cached_books:
-        return cached_books
+    """
+    Unified bestseller fetcher:
+    1️⃣ Try NYT API
+    2️⃣ Fallback to Google Books “bestseller OR popular books”
+    3️⃣ Fallback to local DB (top-rated)
+    """
+    cache_key = "bestsellers_combined"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached[:limit]
 
-    books_data = get_nyt_bestsellers(limit=limit)
-    books = [normalize_nyt_book(item) for item in books_data]
-    cache.set(cache_key, books, 60 * 60 * 6)  # Cache for 6 hours
+    books = []
+
+    # 1️⃣ Try NYT API
+    nyt_books = get_nyt_bestsellers()
+    if nyt_books:
+        books = nyt_books[:limit]
+        print("✅ Using NYT bestsellers")
+    else:
+        # 2️⃣ Google Books Fallback
+        print("⚠️ Falling back to Google Books bestseller search...")
+        google_data = search_google_books("bestseller OR popular books", max_results=limit)
+        if google_data and "items" in google_data:
+            books = [
+                {
+                    "google_id": i["id"],
+                    "title": i["volumeInfo"].get("title"),
+                    "authors": i["volumeInfo"].get("authors", []),
+                    "thumbnail": (i["volumeInfo"].get("imageLinks", {}) or {}).get("thumbnail"),
+                    "description": i["volumeInfo"].get("description"),
+                    "average_rating": i["volumeInfo"].get("averageRating"),
+                }
+                for i in google_data["items"]
+            ]
+            print("✅ Using Google Books fallback.")
+        else:
+            # 3️⃣ Local DB Fallback
+            print("⚠️ Falling back to local DB top-rated books.")
+            local_books = (
+                Book.objects.filter(average_rating__isnull=False)
+                .order_by("-average_rating")[:limit]
+                .values("google_id", "title", "authors", "thumbnail_url", "average_rating")
+            )
+            books = list(local_books)
+
+    cache.set(cache_key, books, timeout=60 * 60 * 6)
     return books
 
 # -------------------------------

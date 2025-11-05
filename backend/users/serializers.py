@@ -158,3 +158,70 @@ class UserDashboardSerializer(serializers.Serializer):
             ReviewSerializer(review).data
             for review in obj["recent_reviews"]
         ]
+    
+# ======================================================
+# 🔹 Login (Send OTP) Serializer
+# ======================================================
+class LoginSendOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        email = attrs.get("email")
+        password = attrs.get("password")
+
+        if not email or not password:
+            raise serializers.ValidationError("Email and password are required.")
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User not found.")
+
+        if not user.is_verified:
+            raise serializers.ValidationError("Please verify your email first.")
+
+        if not user.check_password(password):
+            raise serializers.ValidationError("Invalid credentials.")
+
+        attrs["user"] = user
+        return attrs
+
+
+# ======================================================
+# 🔹 Login (Verify OTP) Serializer
+# ======================================================
+class LoginVerifyOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        email = attrs.get("email")
+        otp_input = attrs.get("otp")
+        password = attrs.get("password")
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User not found.")
+
+        if not user.is_verified:
+            raise serializers.ValidationError("Email not verified.")
+
+        if not user.check_password(password):
+            raise serializers.ValidationError("Invalid credentials.")
+
+        # ✅ Check OTP from EmailOTP model (instead of session)
+        try:
+            otp_obj = EmailOTP.objects.filter(user=user, otp=otp_input, purpose="login").latest("created_at")
+        except EmailOTP.DoesNotExist:
+            raise serializers.ValidationError("Invalid or expired OTP.")
+
+        if otp_obj.is_expired():
+            raise serializers.ValidationError("OTP expired.")
+
+        # Cleanup after successful verification
+        otp_obj.delete()
+        attrs["user"] = user
+        return attrs

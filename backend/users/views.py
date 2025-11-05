@@ -6,7 +6,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from backend.books.models import UserBookInteraction, Review
-from backend.books.serializers import BookSerializer, ReviewSerializer
+from .serializers import LoginSendOTPSerializer, LoginVerifyOTPSerializer, BookSerializer, ReviewSerializer
+from django.utils import timezone
+from rest_framework_simplejwt.tokens import RefreshToken
+from .models import EmailOTP
+import random
 from django.utils import timezone
 
 from .serializers import (
@@ -88,59 +92,44 @@ class RegisterVerifyOTPView(APIView):
             status=200,
         )
 
-
 # ======================================================
-# 🔹 Login via OTP
+# 🔹 Login via OTP (Step 1)
 # ======================================================
 class LoginOTPView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        email = request.data.get("email")
-        password = request.data.get("password")
+        serializer = LoginSendOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
 
-        if not email or not password:
-            return Response({"detail": "Email and password required."}, status=400)
+        # ✅ Use utility function (handles DB + expiry)
+        send_otp_email(user, purpose="login")
 
-        try:
-            user = CustomUser.objects.get(email=email)
-        except CustomUser.DoesNotExist:
-            return Response({"detail": "User not found."}, status=404)
+        return Response(
+            {"detail": f"OTP sent to {user.email}. Verify to complete login."},
+            status=200,
+        )
+    
 
-        if not user.is_verified:
-            return Response({"detail": "Please verify your email first."}, status=403)
-
-        user_auth = authenticate(request, email=email, password=password)
-        if not user_auth:
-            return Response({"detail": "Invalid credentials."}, status=401)
-
-        send_otp_email(user_auth, purpose="login")
-        request.session["otp_user_id"] = user_auth.id
-        return Response({"detail": "OTP sent to your registered email."}, status=200)
-
-
-# ======================================================
-# 🔹 Verify OTP (Login Step 2)
-# ======================================================
 class OTPVerifyView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        user_id = request.session.get("otp_user_id")
-        if not user_id:
-            return Response({"detail": "Session expired or missing."}, status=400)
-
-        user = CustomUser.objects.get(id=user_id)
-        serializer = OTPVerifySerializer(data=request.data, context={"user": user})
+        serializer = LoginVerifyOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
 
         refresh = RefreshToken.for_user(user)
-        request.session.pop("otp_user_id", None)
-
         return Response(
-            {"detail": "Login successful.", "refresh": str(refresh), "access": str(refresh.access_token)},
+            {
+                "detail": "Login successful.",
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            },
             status=200,
         )
+
 
 
 # ======================================================

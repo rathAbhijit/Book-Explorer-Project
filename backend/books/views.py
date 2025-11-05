@@ -165,17 +165,23 @@ class BookSummaryView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 # -------------------------------
-# Home / Genre Top / Recent / Bestseller Books
+# 🏠 Home / Genre / Recent / Bestseller Books
 # -------------------------------
 class HomeBooksView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
+        """Unified homepage data — cached and resilient to API failures."""
+        carousel = get_genre_top_books(limit=10)
+        recent = get_recent_books(limit=10)
+        bestsellers = get_bestsellers(limit=10)
+
         return Response({
-            "carousel": get_genre_top_books(limit=10),
-            "recent": get_recent_books(limit=10),
-            "bestsellers": get_bestsellers(limit=10)
+            "carousel": carousel,
+            "recent": recent,
+            "bestsellers": bestsellers or [],
         })
+
 
 
 # -------------------------------

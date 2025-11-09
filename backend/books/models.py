@@ -34,7 +34,7 @@ class Book(models.Model):
 # ============================================================
 class UserBookInteraction(models.Model):
     class Status(models.TextChoices):
-        WANT_TO_READ = "WTR", "Want to Read"
+        WILL_READ = "WR", "Will Read"
         READING = "RDG", "Reading"
         READ = "RD", "Read"
 
@@ -44,7 +44,7 @@ class UserBookInteraction(models.Model):
         related_name="interactions",
     )
     book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="interactions")
-    status = models.CharField(max_length=3, choices=Status.choices, null=True, blank=True)
+    status = models.CharField(max_length=4, choices=Status.choices, null=True, blank=True)
     is_favorite = models.BooleanField(default=False)
 
     class Meta:

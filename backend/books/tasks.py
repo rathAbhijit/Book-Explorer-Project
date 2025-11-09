@@ -24,7 +24,7 @@ def generate_summary_task(self, google_id):
             try:
                 book = Book.objects.get(google_id=google_id)
                 book.ai_summary = summary
-                book.save(update_fields=["ai_summary"])
+                book.save(update_fields=["ai_summary"]) 
                 print(f"✅ [Celery] Summary saved for '{book.title}' ({google_id})")
             except Book.DoesNotExist:
                 print(f"⚠️ [Celery] Book {google_id} not found while saving summary.")

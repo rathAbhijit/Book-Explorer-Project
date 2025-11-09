@@ -201,6 +201,11 @@ class LoginVerifyOTPSerializer(serializers.Serializer):
         otp_input = attrs.get("otp")
         password = attrs.get("password")
 
+        from .models import EmailOTP  # safe local import to avoid circular dependency
+        from django.utils import timezone
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
@@ -212,7 +217,6 @@ class LoginVerifyOTPSerializer(serializers.Serializer):
         if not user.check_password(password):
             raise serializers.ValidationError("Invalid credentials.")
 
-        # ✅ Check OTP from EmailOTP model (instead of session)
         try:
             otp_obj = EmailOTP.objects.filter(user=user, otp=otp_input, purpose="login").latest("created_at")
         except EmailOTP.DoesNotExist:
@@ -221,7 +225,6 @@ class LoginVerifyOTPSerializer(serializers.Serializer):
         if otp_obj.is_expired():
             raise serializers.ValidationError("OTP expired.")
 
-        # Cleanup after successful verification
         otp_obj.delete()
         attrs["user"] = user
         return attrs

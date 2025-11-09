@@ -90,15 +90,20 @@ class ReviewMiniSerializer(serializers.ModelSerializer):
         fields = ["id", "username", "rating", "comment", "created_at"]
 
 
-class UserBookInteractionMiniSerializer(serializers.ModelSerializer):
-    """Minimal serializer to show user's reading/favorite status."""
+class UserBookInteractionSerializer(serializers.ModelSerializer):
+    user = serializers.ReadOnlyField(source='user.name')
+    book = serializers.PrimaryKeyRelatedField(queryset=Book.objects.all())
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
     class Meta:
         model = UserBookInteraction
-        fields = ["status", "is_favorite"]
+        fields = ["user", "book", "status", "status_display", "is_favorite"]
 
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation['book'] = BookSerializer(instance.book).data
+        return representation
 # books/serializers.py (append at bottom)
-
-from rest_framework import serializers
 
 class SummarizeTextSerializer(serializers.Serializer):
     text = serializers.CharField(allow_blank=False, trim_whitespace=False)
@@ -115,3 +120,8 @@ class SummarizeUploadSerializer(serializers.Serializer):
         if f.size > 10 * 1024 * 1024:
             raise serializers.ValidationError("File too large (max 10 MB).")
         return f
+
+class UserBookInteractionMiniSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserBookInteraction
+        fields = ["status", "is_favorite"]

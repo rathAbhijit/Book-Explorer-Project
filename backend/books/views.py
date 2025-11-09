@@ -25,11 +25,18 @@ from .services import (
     get_bestsellers,
     fetch_author_details,
     get_explore_books,
+    get_popular_now_books,
 
 )
 from .permissions import IsOwnerOrReadOnly
-from .tasks import generate_summary_task
-
+from .tasks import generate_summary_task, generate_book_embedding_task
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+from .models import UserBookInteraction, Book
+from .serializers import UserBookInteractionSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
 from .serializers import SummarizeTextSerializer, SummarizeUploadSerializer
 from .services import summarize_user_text, summarize_user_upload
@@ -40,9 +47,18 @@ from .services import summarize_user_text, summarize_user_upload
 # 🧭 Unified Explore Endpoint (Search + Filter + Sort)
 # ============================================================
 class ExploreBooksView(APIView):
+    """
+    Unified Explore endpoint supporting:
+      - Full-text search
+      - Genre filtering
+      - Sorting (newest / popular)
+      - Pagination (page, page_size)
+      - Caching per combination of params
+    """
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
+        # ---- Query Params ----
         query = request.query_params.get("q")
         genre = request.query_params.get("genre")
         sort = request.query_params.get("sort")
@@ -50,51 +66,43 @@ class ExploreBooksView(APIView):
         page = int(request.query_params.get("page", 1))
         page_size = int(request.query_params.get("page_size", 10))
 
-        # Generate a unique cache key per combination of params
-        cache_key = f"explore_{query or genre or 'default'}_{sort or 'none'}_{page}_{page_size}"
+        # ---- Cache Key ----
+        cache_key = f"explore_{query or genre or sort or 'default'}_{page}_{page_size}"
         cached_data = cache.get(cache_key)
-
-        # If cached data exists, return it instantly
         if cached_data:
-            return Response(
-                {**cached_data, "cached": True},
-                status=status.HTTP_200_OK
+            return Response({**cached_data, "cached": True}, status=status.HTTP_200_OK)
+
+        # ---- Get Explore Data ----
+        try:
+            result = get_explore_books(
+                query=query,
+                genre=genre,
+                sort=sort,
+                limit=limit,
+                page=page,
+                page_size=page_size,
             )
-
-        # Call the core explore service
-        result = get_explore_books(
-            query=query,
-            genre=genre,
-            sort=sort,
-            limit=limit,
-            page=page,
-            page_size=page_size,
-        )
-
-        # If Google API returned an error
-        if isinstance(result, dict) and "error" in result:
-            # Try fallback: if cached version exists, return it instead
+        except Exception as e:
+            # 🔸 Optional fallback: if Google API fails
             fallback = cache.get("explore_fallback")
             if fallback:
                 return Response(
                     {
-                        "error": result["error"],
-                        "hint": result.get("hint", "Cached data shown due to API failure."),
+                        "error": str(e),
+                        "hint": "Google API failed — showing cached fallback.",
                         "fallback_data": fallback,
                         "cached": True,
                     },
                     status=status.HTTP_502_BAD_GATEWAY,
                 )
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # If no cache fallback available, send clean failure
-            return Response(result, status=status.HTTP_502_BAD_GATEWAY)
+        # ---- Cache Result ----
+        cache.set(cache_key, result, 60 * 60 * 3)  # 3 hours
+        cache.set("explore_fallback", result, 60 * 60 * 3)
 
-        # If successful, cache for next time (6 hours)
-        cache.set(cache_key, result, timeout=60 * 60 * 6)
-        cache.set("explore_fallback", result, timeout=60 * 60 * 6)
-
-        return Response(result, status=status.HTTP_200_OK)
-
+        # ---- Return Unified Response ----
+        return Response({**result, "cached": False}, status=status.HTTP_200_OK)
 # -------------------------------
 # Book Details
 # -------------------------------
@@ -104,10 +112,11 @@ class BookDetailView(APIView):
     def get(self, request, google_id):
         book = get_or_create_book_details(google_id)
         if not book:
-            return Response({"error": "Book not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Invalid or unavailable Google ID."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = BookSerializer(book)
         return Response(serializer.data)
+
 
 
 # -------------------------------
@@ -176,55 +185,112 @@ class HomeBooksView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        """Unified homepage data — cached and resilient to API failures."""
+        """
+        Unified homepage data — carousel, recent, and popular sections.
+        Cached for 1 hour to minimize repeated API calls.
+        """
+        cache_key = "home_books_combined_v2"
+        cached = cache.get(cache_key)
+
+        if cached:
+            return Response({**cached, "cached": True}, status=status.HTTP_200_OK)
+
+        # --- Generate fresh data ---
         carousel = get_genre_top_books(limit=10)
         recent = get_recent_books(limit=10)
-        bestsellers = get_bestsellers(limit=10)
+        popular_now = get_popular_now_books(limit=10)
 
-        return Response({
+        result = {
             "carousel": carousel,
             "recent": recent,
-            "bestsellers": bestsellers or [],
-        })
+            "bestsellers": popular_now,  # kept key same for frontend compatibility
+        }
 
+        # --- Cache full response for 1 hour ---
+        cache.set(cache_key, result, timeout=60 * 60)
+
+        return Response(result, status=status.HTTP_200_OK)
 
 
 # -------------------------------
 # UserBookInteraction
 # -------------------------------
 class UserBookInteractionView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    """
+    POST → Create or update a user-book interaction
+    PUT → Explicitly update existing status/favorite flags
+    """
+    permission_classes = [IsAuthenticated]
 
+    # --- Create or Update (Auto Upsert) ---
     def post(self, request):
-        serializer = UserBookInteractionSerializer(
-            data=request.data, context={"request": request}
-        )
-        if serializer.is_valid():
-            serializer.save(user=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        book_id = request.data.get("book")
+        status_code = request.data.get("status")
+        is_favorite = request.data.get("is_favorite")
 
-    def put(self, request):
-        book_id = request.data.get("book_id")
         if not book_id:
+            return Response({"error": "Book ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate status short codes
+        valid_statuses = {"WR", "RDG", "RD"}
+        if status_code and status_code not in valid_statuses:
             return Response(
-                {"error": "book_id is required."},
+                {"error": "Invalid status value. Must be one of WR, RDG, RD."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        interaction = get_object_or_404(
-            UserBookInteraction, user=request.user, book_id=book_id
+        # Ensure book exists
+        book = get_object_or_404(Book, google_id=book_id)
+
+        # Create or update user-book interaction
+        interaction, created = UserBookInteraction.objects.get_or_create(
+            user=request.user, book=book
         )
 
-        serializer = UserBookInteractionSerializer(
-            interaction, data=request.data, partial=True, context={"request": request}
+        if status_code:
+            interaction.status = status_code
+        if is_favorite is not None:
+            interaction.is_favorite = is_favorite
+
+        interaction.save()
+        serializer = UserBookInteractionSerializer(interaction)
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    # --- Explicit Update (Existing Interaction Only) ---
+    def put(self, request):
+        book_id = request.data.get("book_id")
+        status_code = request.data.get("status")
+        is_favorite = request.data.get("is_favorite")
 
+        if not book_id:
+            return Response({"error": "book_id is required."}, status=400)
+
+        try:
+            interaction = UserBookInteraction.objects.get(
+                user=request.user, book__google_id=book_id
+            )
+        except UserBookInteraction.DoesNotExist:
+            return Response({"error": "Interaction not found."}, status=404)
+
+        # Validate and update fields
+        valid_statuses = {"WR", "RDG", "RD"}
+        if status_code and status_code not in valid_statuses:
+            return Response(
+                {"error": "Invalid status value. Must be one of WR, RDG, RD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if status_code:
+            interaction.status = status_code
+        if is_favorite is not None:
+            interaction.is_favorite = is_favorite
+
+        interaction.save()
+        return Response(UserBookInteractionSerializer(interaction).data, status=200)
 # -------------------------------
 # Review Create / Get for a Book
 # -------------------------------
@@ -301,55 +367,97 @@ class DeleteReviewView(APIView):
 # User Library & Favorites
 # -------------------------------
 class UserLibraryView(APIView):
+    """
+    Returns user's library grouped by status:
+    {
+        "library": {
+            "will_read": [...],
+            "reading": [...],
+            "read": [...],
+            "favorites": [...]
+        }
+    }
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        interactions = UserBookInteraction.objects.filter(
-            user=request.user
-        ).select_related('book')
+        user = request.user
+        interactions = (
+            UserBookInteraction.objects.filter(user=user)
+            .select_related("book")
+            .order_by("-id")
+        )
 
-        serializer = UserBookInteractionSerializer(interactions, many=True)
-        return Response({"library": serializer.data})
+        will_read = [i for i in interactions if i.status == UserBookInteraction.Status.WILL_READ]
+        reading = [i for i in interactions if i.status == UserBookInteraction.Status.READING]
+        read = [i for i in interactions if i.status == UserBookInteraction.Status.READ]
+        favorites = [i for i in interactions if i.is_favorite]
 
+        serializer = UserBookInteractionSerializer
+        response_data = {
+            "library": {
+                "will_read": serializer(will_read, many=True).data,
+                "reading": serializer(reading, many=True).data,
+                "read": serializer(read, many=True).data,
+                "favorites": serializer(favorites, many=True).data,
+            }
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class UserFavoritesView(APIView):
+    """
+    Returns a flat list of user's favorite books.
+    Independent of status (WR / RDG / RD).
+    Supports optional ?status= filter.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        favorites = UserBookInteraction.objects.filter(
-            user=request.user, is_favorite=True
-        ).select_related('book')
+        status_filter = request.query_params.get("status")
 
-        serializer = UserBookInteractionSerializer(favorites, many=True)
-        return Response({"favorites": serializer.data})
+        favorites_qs = UserBookInteraction.objects.filter(
+            user=request.user,
+            is_favorite=True,
+        ).select_related("book")
+
+        if status_filter in [
+            UserBookInteraction.Status.WILL_READ,
+            UserBookInteraction.Status.READING,
+            UserBookInteraction.Status.READ,
+        ]:
+            favorites_qs = favorites_qs.filter(status=status_filter)
+
+        favorites_qs = favorites_qs.order_by("-id")
+        serializer = UserBookInteractionSerializer(favorites_qs, many=True)
+
+        return Response({"favorites": serializer.data}, status=status.HTTP_200_OK)
 
 
 class RecommendationView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        # Check if ready in-service
         result = get_user_recommendations(request.user, top_n=10)
         if result["status"] == "ready":
             serializer = BookSerializer(result["books"], many=True, context={"request": request})
             return Response({"status": "ready", "recommendations": serializer.data}, status=200)
 
-        # Not ready -> start async task (safe to call multiple times)
+        # Task trigger (FIXED HERE)
         task = generate_recommendations_task.delay(request.user.id, 10)
+
         return Response({
             "status": "processing",
             "message": "Recommendation generation started. Retry this endpoint in a few seconds.",
             "task_id": task.id
         }, status=202)
+
     
     
 # ============================================================
 # 🔹 Author Endpoints
 # ============================================================
 class AuthorDetailView(APIView):
-    """
-    Returns author biography, top subjects, and basic stats.
-    """
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, author_name):

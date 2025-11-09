@@ -1,3 +1,4 @@
+from numpy import sort
 import requests
 import os
 import time
@@ -8,6 +9,7 @@ from openai import OpenAI
 from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Avg
+from sympy import limit
 
 from .models import Review, Book, UserBookInteraction
 from .serializers import (
@@ -29,10 +31,10 @@ except Exception:
 # External API helpers
 # -------------------------------
 
-def search_google_books(query, max_results=20):
+def search_google_books(query, max_results=20, start_index=0):
     """Query the Google Books API with a search term or subject safely."""
     url = "https://www.googleapis.com/books/v1/volumes"
-    max_results = min(max_results, 40)  # Google API limit
+    max_results = min(max_results, 40)  
     safe_query = quote(query)
 
     params = {
@@ -68,7 +70,6 @@ def search_google_books(query, max_results=20):
         }
     
 
-# RENAMED and FIXED: This now correctly fetches raw API data.
 def fetch_google_book_by_id(google_id):
     """Get details for a specific book by Google ID from the API."""
     url = f"https://www.googleapis.com/books/v1/volumes/{google_id}"
@@ -182,36 +183,84 @@ def get_or_create_book_details(google_id):
 # -------------------------------
 
 # ADDED: Caching for performance
+# ============================================================
+# 🔹 Genre Top Books (Improved for Carousel)
+# ============================================================
 def get_genre_top_books(limit=10):
-    """Get top book from each genre (Google Books), with caching."""
-    cache_key = "genre_top_books"
-    cached_books = cache.get(cache_key)
-    if cached_books:
-        return cached_books
+    """
+    Improved version that pulls visually rich, relevant books from
+    curated high-interest genres for carousel display.
+    Caches results for 6 hours.
+    """
+    cache_key = "genre_top_books_curated"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
 
-    genres = ["Science Fiction", "Science", "History", "Biography", "Fantasy", "Romance"]
+    # 🎯 Curated high-engagement genres (fiction-heavy & trending)
+    curated_genres = [
+        "bestseller fiction",
+        "modern fantasy",
+        "popular thriller",
+        "romantic comedy",
+        "science fiction novel",
+        "historical fiction",
+        "graphic novel",
+        "inspirational memoir",
+        "crime mystery",
+        "young adult fiction"
+    ]
+
     books = []
-    for genre in genres[:limit]:
+    for genre in curated_genres[:limit]:
         data = search_google_books(f"subject:{genre}", max_results=1)
         if data and "items" in data:
-            books.append(normalize_google_book(data["items"][0]))
-    
-    cache.set(cache_key, books, 60 * 60 * 6)  # Cache for 6 hours
+            normalized = [normalize_google_book(i) for i in data["items"]]
+            books.extend(normalized)
+
+    # fallback: if Google Books fails, reuse from popular_now
+    if not books:
+        books = get_popular_now_books(limit=10)
+
+    cache.set(cache_key, books, timeout=60 * 60 * 6)  # 6h
     return books
 
+
 # ADDED: Caching for performance
+# ============================================================
+# 🔹 Recently Added Books (Curated for Interest)
+# ============================================================
 def get_recent_books(limit=10):
-    """Get recently published books (Google Books), with caching."""
-    cache_key = "recent_books"
+    """
+    Fetch recent, high-quality books instead of random low-quality results.
+    Focuses on fiction & trending genres. Cached for 6 hours.
+    """
+    cache_key = "recent_books_curated"
     cached_books = cache.get(cache_key)
     if cached_books:
         return cached_books
-    
-    data = search_google_books("newest", max_results=limit)
-    if not data:
-        return []
-    books = [normalize_google_book(item) for item in data.get("items", [])]
-    cache.set(cache_key, books, 60 * 60 * 6)  # Cache for 6 hours
+
+    # Target genres that constantly have new titles
+    queries = [
+        "new fiction releases",
+        "recent fantasy novels",
+        "latest mystery books",
+        "2024 popular romance",
+        "recent sci-fi releases"
+    ]
+
+    books = []
+    for q in queries:
+        data = search_google_books(q, max_results=3)
+        if data and "items" in data:
+            normalized = [normalize_google_book(item) for item in data["items"]]
+            books.extend(normalized)
+
+    books = books[:limit]
+    if not books:
+        books = get_popular_now_books(limit=limit)
+
+    cache.set(cache_key, books, 60 * 60 * 6)
     return books
 
 # ADDED: Caching for performance
@@ -418,21 +467,28 @@ def fetch_author_details(author_name: str):
     return author_info
 
 
+
 def paginate_list(items, page=1, page_size=10):
-    """Simple pagination utility for list-based data."""
+    """
+    Slice a Python list manually and return pagination metadata.
+    """
     total = len(items)
-    total_pages = ceil(total / page_size)
     start = (page - 1) * page_size
     end = start + page_size
-    paginated = items[start:end]
+    sliced = items[start:end]
+
+    has_more = end < total
+    next_page = page + 1 if has_more else None
 
     return {
+        "results": sliced,
         "page": page,
+        "next_page": next_page,
         "page_size": page_size,
-        "total_items": total,
-        "total_pages": total_pages,
-        "results": paginated,
+        "total": total,
+        "has_more": has_more,
     }
+
 
 # ============================================================
 # 🔹 Explore Page Handler (Unified Logic)
@@ -440,75 +496,115 @@ def paginate_list(items, page=1, page_size=10):
 def get_explore_books(query=None, genre=None, sort=None, limit=50, page=1, page_size=10):
     """
     Unified backend handler for the Explore page (search, genre, sorting) with pagination.
-    Default mode returns curated genre-based sections.
+    Default mode returns curated multi-genre sections (Fiction, Novel, Mystery, etc.),
+    along with Recent and Popular (Bestseller) sections.
     """
-    cache_key = f"explore_{query or genre or sort or 'default'}_{limit}"
+
+    # Unique cache key per mode and page
+    cache_key = f"explore_{query or genre or sort or 'default'}_{page}_{page_size}"
     cached = cache.get(cache_key)
     if cached:
         return cached
 
     # ==============================
-    # 1️⃣ Search Mode
+    # 1️⃣ SEARCH MODE — Paginated Search Results
     # ==============================
     if query:
-        data = search_google_books(query, max_results=limit)
+        # true pagination: Google Books supports startIndex
+        start_index = (page - 1) * page_size
+        data = search_google_books(query, max_results=page_size)
         books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
-        paginated = paginate_list(books, page=page, page_size=page_size)
-        result = {"mode": "search", "data": paginated}
-        cache.set(cache_key, result, 60 * 60 * 3)
+
+        total_items = min(data.get("totalItems", len(books)), 200)  # cap to avoid 1M issue
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+
+        result = {
+            "mode": "search",
+            "data": {
+                "results": books,
+                "page": page,
+                "total_pages": total_pages,
+                "total_items": total_items,
+            },
+        }
+
+        cache.set(cache_key, result, timeout=60 * 60)  # 1 hour cache
         return result
 
     # ==============================
-    # 2️⃣ Genre Mode
+    # 2️⃣ GENRE MODE — Paginated by Subject
     # ==============================
     if genre:
-        data = search_google_books(f"subject:{genre}", max_results=limit)
+        start_index = (page - 1) * page_size
+        data = search_google_books(f"subject:{genre}", max_results=page_size)
         books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
-        paginated = paginate_list(books, page=page, page_size=page_size)
-        result = {"mode": "genre", "data": paginated}
-        cache.set(cache_key, result, 60 * 60 * 3)
+
+        total_items = min(data.get("totalItems", len(books)), 200)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+
+        result = {
+            "mode": "genre",
+            "data": {
+                "results": books,
+                "page": page,
+                "total_pages": total_pages,
+                "total_items": total_items,
+            },
+        }
+
+        cache.set(cache_key, result, timeout=60 * 60)
         return result
 
     # ==============================
-    # 3️⃣ Sorting Mode
+    # 3️⃣ SORT MODE — Newest / Bestsellers
     # ==============================
     if sort == "newest":
         books = get_recent_books(limit=limit)
-        result = {"mode": "sorted", "data": paginate_list(books, page=page, page_size=page_size)}
-        cache.set(cache_key, result, 60 * 60 * 3)
-        return result
     elif sort == "bestsellers":
         books = get_bestsellers(limit=limit)
-        result = {"mode": "sorted", "data": paginate_list(books, page=page, page_size=page_size)}
-        cache.set(cache_key, result, 60 * 60 * 3)
+    else:
+        books = []
+
+    if books:
+        total_items = len(books)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        result = {
+            "mode": "sorted",
+            "data": {
+                "results": books,
+                "page": page,
+                "total_pages": total_pages,
+                "total_items": total_items,
+            },
+        }
+
+        cache.set(cache_key, result, timeout=60 * 60)
         return result
 
     # ==============================
-    # 4️⃣ Default Mode — Curated Explore View
+    # 4️⃣ DEFAULT MODE — BOOKEX-CORE HOME (NO CAROUSEL)
     # ==============================
-    print("✨ Building curated Explore default view...")
+    print("✨ Building default Explore multi-genre view...")
 
     sections = {}
     genres = ["Fiction", "Novel", "Mystery", "History", "Science", "Science Fiction"]
 
-    # Each genre → 5 books
     for g in genres:
-        data = search_google_books(f"subject:{g}", max_results=5)
+        data = search_google_books(f"subject:{g}", max_results=7)
         if data and "items" in data:
             sections[g.lower().replace(" ", "_")] = [normalize_google_book(item) for item in data["items"]]
 
-    # Recent and popular sections
-    sections["recent"] = get_recent_books(limit=8)
-    sections["popular"] = get_bestsellers(limit=8)
+    # Add curated sections
+    sections["recent"] = get_recent_books(limit=7)
+    sections["popular"] = get_bestsellers(limit=7)
 
     result = {
         "mode": "default",
-        "sections": sections
+        "sections": sections,
     }
 
-    cache.set(cache_key, result, 60 * 60 * 3)
+    cache.set(cache_key, result, timeout=60 * 60 * 3)  # 3-hour cache
     return result
-
 
 
 
@@ -816,3 +912,29 @@ def summarize_user_text(text: str, max_summary_words: int = 250) -> dict:
     return result
 
 
+# ============================================================
+# 🔹 Popular Now Books (Uniform with Carousel)
+# ============================================================
+def get_popular_now_books(limit=10):
+
+    cache_key = "popular_now_books"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    trending_queries = [
+        "fiction", "thriller", "fantasy", "romance",
+        "science fiction", "mystery", "biography", "history"
+    ]
+
+    books = []
+    for q in trending_queries:
+        data = search_google_books(f"subject:{q}", max_results=2)
+        if data and "items" in data:
+            normalized = [normalize_google_book(i) for i in data["items"]]
+            books.extend(normalized)
+
+    # Trim list to desired limit
+    books = books[:limit]
+    cache.set(cache_key, books, timeout=60 * 60 * 6)  # 6 hours
+    return books

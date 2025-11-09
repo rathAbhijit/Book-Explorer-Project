@@ -77,15 +77,21 @@ def send_otp_email(user: CustomUser, purpose: str = "verification", otp: str | N
 # ======================================================
 # 🔹 Registration-Specific Helper
 # ======================================================
+# In send_registration_otp() — replace entire function with this version:
+
 def send_registration_otp(email: str, name: str = "") -> str:
     """
     Used in pre-verification flow when the user doesn't exist yet.
     Creates a temporary inactive user and sends a registration OTP.
     """
-    user, _ = CustomUser.objects.get_or_create(
+    user, _ = CustomUser.objects.update_or_create(
         email=email,
         defaults={"name": name, "is_active": False, "is_verified": False},
     )
+
+    # ✅ Clean up old OTPs for this purpose before issuing a new one
+    EmailOTP.objects.filter(user=user, purpose="registration").delete()
+
     return send_otp_email(user, purpose="registration")
 
 

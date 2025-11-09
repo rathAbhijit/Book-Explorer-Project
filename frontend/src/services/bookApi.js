@@ -49,3 +49,6 @@ export const getAuthorDetails = (authorName) =>
 
 export const getMoreFromAuthor = (authorName) =>
   API.get(`books/more-from-author/${encodeURIComponent(authorName)}/`);
+
+export const getExploreData = (params = {}) =>
+  API.get("explore/", { params });

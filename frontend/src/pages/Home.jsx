@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getHomeData } from "../services/bookApi";
+import { getHomeData } from "../services/bookApi"; 
 import Carousel from "../components/Carousel";
 import SectionBlock from "../components/SectionBlock";
 
@@ -25,15 +25,16 @@ export default function Home() {
     fetchData();
   }, []);
 
+  // ✅ Redirect search to Search.jsx page
   const handleSearch = (e) => {
     e.preventDefault();
     if (!query.trim()) return;
-    navigate(`/explore?q=${encodeURIComponent(query.trim())}`);
+    navigate(`/search?q=${encodeURIComponent(query.trim())}`);
   };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      {/* Search Bar */}
+      {/* 🔍 Search Bar */}
       <div className="w-full max-w-4xl mx-auto mt-8 px-4">
         <form onSubmit={handleSearch} className="relative">
           <input
@@ -52,23 +53,23 @@ export default function Home() {
         </form>
       </div>
 
-      {/* Carousel */}
+      {/* 🎠 Carousel */}
       <div className="w-full max-w-5xl mx-auto mt-10 px-4">
         <Carousel items={homeData.carousel} />
       </div>
 
-      {/* Dual Sections */}
+      {/* 📚 Dual Sections */}
       <div className="w-full max-w-6xl mx-auto mt-12 px-6 mb-16 grid grid-cols-1 lg:grid-cols-2 gap-8">
         <SectionBlock
           title="🔥 Bestsellers"
           data={homeData.bestsellers}
           isBestseller
-          onViewAll={() => navigate("/explore?q=bestsellers")}
+          onViewAll={() => navigate("/explore?sort=popular")}
         />
         <SectionBlock
           title="🕓 Recently Added"
           data={homeData.recent}
-          onViewAll={() => navigate("/explore?q=recent")}
+          onViewAll={() => navigate("/explore?sort=newest")}
         />
       </div>
     </div>

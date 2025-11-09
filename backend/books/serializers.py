@@ -95,3 +95,23 @@ class UserBookInteractionMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserBookInteraction
         fields = ["status", "is_favorite"]
+
+# books/serializers.py (append at bottom)
+
+from rest_framework import serializers
+
+class SummarizeTextSerializer(serializers.Serializer):
+    text = serializers.CharField(allow_blank=False, trim_whitespace=False)
+    max_summary_words = serializers.IntegerField(required=False, min_value=30, max_value=1200, default=250)
+
+class SummarizeUploadSerializer(serializers.Serializer):
+    file = serializers.FileField()
+    max_summary_words = serializers.IntegerField(required=False, min_value=30, max_value=1200, default=250)
+
+    def validate_file(self, f):
+        allowed = {"application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+        if f.content_type not in allowed:
+            raise serializers.ValidationError("Unsupported file type. Allowed: PDF, TXT, DOCX.")
+        if f.size > 10 * 1024 * 1024:
+            raise serializers.ValidationError("File too large (max 10 MB).")
+        return f

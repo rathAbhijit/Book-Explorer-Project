@@ -24,24 +24,35 @@ export default function BookRowCard({ book, isBestseller = false, onClick }) {
   return (
     <div
       onClick={onClick}
-      className="flex items-center bg-gray-800 border border-gray-700 rounded-xl p-3 hover:scale-[1.02] hover:border-red-500/60 transition cursor-pointer"
+      className="flex flex-col sm:flex-row items-center sm:items-start bg-gray-800 border border-gray-700 rounded-xl p-4 hover:scale-[1.02] hover:border-red-500/60 transition cursor-pointer w-full h-auto sm:h-36 overflow-hidden"
     >
-      <img
-        src={
-          book.thumbnail ||
-          "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/480px-No_image_available.svg.png"
-        }
-        alt={book.title}
-        className="w-16 h-24 rounded-md object-cover"
-      />
-      <div className="ml-3 flex-1">
-        <p className="text-sm font-semibold flex items-center">
+      {/* Book Thumbnail */}
+      <div className="flex-shrink-0 mb-3 sm:mb-0 sm:mr-4">
+        <img
+          src={
+            book.thumbnail ||
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/480px-No_image_available.svg.png"
+          }
+          alt={book.title}
+          className="w-20 h-28 object-cover rounded-md border border-gray-700 mx-auto sm:mx-0"
+          onError={(e) => {
+            e.currentTarget.src =
+              "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/480px-No_image_available.svg.png";
+          }}
+        />
+      </div>
+
+      {/* Book Info */}
+      <div className="flex-1 min-w-0 text-center sm:text-left">
+        <p className="text-sm font-semibold flex justify-center sm:justify-start items-center text-white line-clamp-1">
           {isBestseller && getRankBadge(book.rank)}
           {book.title}
         </p>
-        <p className="text-xs text-gray-400">
+
+        <p className="text-xs text-gray-400 truncate">
           {book.authors?.length ? book.authors.join(", ") : "Unknown Author"}
         </p>
+
         {book.description && (
           <p className="text-xs text-gray-500 mt-1 line-clamp-2">
             {book.description}

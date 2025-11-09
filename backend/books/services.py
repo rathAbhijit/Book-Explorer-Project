@@ -15,7 +15,10 @@ from .serializers import (
     ReviewMiniSerializer,
     UserBookInteractionMiniSerializer,
 )
-
+import io
+from typing import List
+from pdfminer.high_level import extract_text as pdf_extract_text
+from docx import Document as DocxDocument
 # --- Configure Gemini ---
 try:
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -434,58 +437,80 @@ def paginate_list(items, page=1, page_size=10):
 # ============================================================
 # 🔹 Explore Page Handler (Unified Logic)
 # ============================================================
-
 def get_explore_books(query=None, genre=None, sort=None, limit=50, page=1, page_size=10):
     """
     Unified backend handler for the Explore page (search, genre, sorting) with pagination.
+    Default mode returns curated genre-based sections.
     """
     cache_key = f"explore_{query or genre or sort or 'default'}_{limit}"
     cached = cache.get(cache_key)
-
     if cached:
-        books = cached.get("books")
-        mode = cached.get("mode", "default")
-    else:
-        books = []
-        mode = "default"
+        return cached
 
-        # Search mode
-        if query:
-            mode = "search"
-            data = search_google_books(query, max_results=limit)
-            books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
-
-        # Genre filter
-        elif genre:
-            mode = "genre"
-            data = search_google_books(f"subject:{genre}", max_results=limit)
-            books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
-
-        # Sorting
-        elif sort == "newest":
-            mode = "sorted"
-            books = get_recent_books(limit=limit)
-        elif sort == "bestsellers":
-            mode = "sorted"
-            books = get_bestsellers(limit=limit)
-        else:
-            # Default explore content
-            mode = "default"
-            books = {
-                "carousel": get_genre_top_books(limit=10),
-                "recent": get_recent_books(limit=10),
-                "bestsellers": get_bestsellers(limit=10),
-            }
-
-        cache.set(cache_key, {"mode": mode, "books": books}, timeout=60 * 60 * 3)
-
-    # Paginate only if books is a list
-    if isinstance(books, list):
+    # ==============================
+    # 1️⃣ Search Mode
+    # ==============================
+    if query:
+        data = search_google_books(query, max_results=limit)
+        books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
         paginated = paginate_list(books, page=page, page_size=page_size)
-    else:
-        paginated = {"mode": mode, "sections": books}  # default homepage-style view (no pagination)
+        result = {"mode": "search", "data": paginated}
+        cache.set(cache_key, result, 60 * 60 * 3)
+        return result
 
-    return {"mode": mode, "data": paginated}
+    # ==============================
+    # 2️⃣ Genre Mode
+    # ==============================
+    if genre:
+        data = search_google_books(f"subject:{genre}", max_results=limit)
+        books = [normalize_google_book(item) for item in data.get("items", [])] if data and "items" in data else []
+        paginated = paginate_list(books, page=page, page_size=page_size)
+        result = {"mode": "genre", "data": paginated}
+        cache.set(cache_key, result, 60 * 60 * 3)
+        return result
+
+    # ==============================
+    # 3️⃣ Sorting Mode
+    # ==============================
+    if sort == "newest":
+        books = get_recent_books(limit=limit)
+        result = {"mode": "sorted", "data": paginate_list(books, page=page, page_size=page_size)}
+        cache.set(cache_key, result, 60 * 60 * 3)
+        return result
+    elif sort == "bestsellers":
+        books = get_bestsellers(limit=limit)
+        result = {"mode": "sorted", "data": paginate_list(books, page=page, page_size=page_size)}
+        cache.set(cache_key, result, 60 * 60 * 3)
+        return result
+
+    # ==============================
+    # 4️⃣ Default Mode — Curated Explore View
+    # ==============================
+    print("✨ Building curated Explore default view...")
+
+    sections = {}
+    genres = ["Fiction", "Novel", "Mystery", "History", "Science", "Science Fiction"]
+
+    # Each genre → 5 books
+    for g in genres:
+        data = search_google_books(f"subject:{g}", max_results=5)
+        if data and "items" in data:
+            sections[g.lower().replace(" ", "_")] = [normalize_google_book(item) for item in data["items"]]
+
+    # Recent and popular sections
+    sections["recent"] = get_recent_books(limit=8)
+    sections["popular"] = get_bestsellers(limit=8)
+
+    result = {
+        "mode": "default",
+        "sections": sections
+    }
+
+    cache.set(cache_key, result, 60 * 60 * 3)
+    return result
+
+
+
 
 # ============================================================
 # 🔹 BOOK DETAIL (FULL) SERVICE
@@ -545,4 +570,249 @@ def clear_book_detail_cache(book_id, user_id=None):
     cache.delete(f"book_full_detail_{book_id}_anon")
     if user_id:
         cache.delete(f"book_full_detail_{book_id}_{user_id}")
+
+# books/services.py (append near bottom, before cache helpers if you want)
+
+import io
+from typing import List
+from pdfminer.high_level import extract_text as pdf_extract_text
+from docx import Document as DocxDocument
+from django.core.cache import cache
+
+# ========== HuggingFace Summarizer (singleton) ==========
+_SUMMARIZER = None
+
+def _get_summarizer():
+    """
+    Lazy-load a local HF summarization pipeline.
+    Default: distilbart for speed. Switch to bart-large-cnn if you prefer quality.
+    """
+    global _SUMMARIZER
+    if _SUMMARIZER is not None:
+        return _SUMMARIZER
+
+    from transformers import pipeline
+
+    # Light model, good on CPU:
+    model_name = "sshleifer/distilbart-cnn-12-6"
+    # Heavier but higher quality:
+    # model_name = "facebook/bart-large-cnn"
+
+    _SUMMARIZER = pipeline(
+        "summarization",
+        model=model_name,
+        tokenizer=model_name,
+        framework="pt",            # Uses torch
+        device=-1                  # CPU; set to 0 for GPU
+    )
+    return _SUMMARIZER
+
+
+# ========== Text Extraction helpers ==========
+def extract_text_from_pdf(fp: io.BytesIO) -> str:
+    try:
+        return pdf_extract_text(fp)
+    except Exception as e:
+        raise ValueError(f"Failed to read PDF: {e}")
+
+def extract_text_from_docx(fp: io.BytesIO) -> str:
+    try:
+        doc = DocxDocument(fp)
+        return "\n".join([p.text for p in doc.paragraphs])
+    except Exception as e:
+        raise ValueError(f"Failed to read DOCX: {e}")
+
+def extract_text_from_txt(fp: io.BytesIO) -> str:
+    try:
+        data = fp.read()
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("latin-1", errors="ignore")
+    except Exception as e:
+        raise ValueError(f"Failed to read TXT: {e}")
+
+
+def extract_text_from_upload(django_file) -> str:
+    content_type = django_file.content_type
+    buf = io.BytesIO(django_file.read())
+
+    if content_type == "application/pdf":
+        return extract_text_from_pdf(buf)
+    elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return extract_text_from_docx(buf)
+    elif content_type == "text/plain":
+        return extract_text_from_txt(buf)
+    else:
+        raise ValueError("Unsupported file type.")
+
+
+# ========== Chunking + Two-pass summarization ==========
+def _split_into_chunks(text: str, max_chars: int = 3000) -> List[str]:
+    """
+    Conservative chunking by characters. Keeps words intact.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        # try to cut at nearest sentence end for better quality
+        cut = end
+        dot = text.rfind(".", start, end)
+        qst = text.rfind("?", start, end)
+        exc = text.rfind("!", start, end)
+        sep = max(dot, qst, exc)
+        if sep > start + max_chars * 0.6:
+            cut = sep + 1
+        chunk = text[start:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = cut
+    return chunks
+
+def summarize_text_local(text: str, max_summary_words: int = 250) -> dict:
+    """
+    Local summarizer using Hugging Face transformer pipeline.
+    Handles long inputs safely, with chunking and graceful fallback.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {
+            "summary": "",
+            "input_words": 0,
+            "summary_words": 0,
+            "compression_ratio": 1.0,
+            "chunks": 0,
+            "error": "Empty input text."
+        }
+
+    summarizer = _get_summarizer()
+    words = text.split()
+    input_words = len(words)
+    target_tokens = max_summary_words * 1.3
+
+    # Hard upper bound on doc size (e.g. 25K chars ≈ 3000–4000 tokens)
+    if len(text) > 25000:
+        return {
+            "summary": None,
+            "input_words": input_words,
+            "summary_words": 0,
+            "compression_ratio": 0,
+            "chunks": 0,
+            "error": "Document too long for summarization. Please upload a smaller file (<25K characters)."
+        }
+
+    # --- Safe chunk splitting
+    chunks = _split_into_chunks(text, max_chars=1500)
+    summaries = []
+
+    for ch in chunks:
+        try:
+            res = summarizer(
+                ch[:3000],  # truncate for token safety
+                max_length=int(min(300, target_tokens)),
+                min_length=int(max(50, target_tokens // 3)),
+                do_sample=False,
+            )
+            summaries.append(res[0]["summary_text"].strip())
+        except Exception as e:
+            print(f"⚠️ Summarization failed on chunk: {e}")
+            continue
+
+    if not summaries:
+        return {
+            "summary": None,
+            "input_words": input_words,
+            "summary_words": 0,
+            "compression_ratio": 0,
+            "chunks": len(chunks),
+            "error": "All text chunks failed to summarize. Try a smaller file."
+        }
+
+    # Combine summaries if multiple chunks
+    combined = " ".join(summaries)
+    if len(chunks) > 1 and len(combined.split()) > max_summary_words:
+        try:
+            res2 = summarizer(
+                combined[:3000],
+                max_length=int(min(400, target_tokens)),
+                min_length=int(max(100, target_tokens // 2)),
+                do_sample=False,
+            )
+            final_summary = res2[0]["summary_text"].strip()
+        except Exception as e:
+            print(f"⚠️ Second pass summarization failed: {e}")
+            final_summary = combined
+    else:
+        final_summary = combined
+
+    summary_words = len(final_summary.split())
+    compression_ratio = max(1.0, (input_words / max(1, summary_words)))
+
+    return {
+        "summary": final_summary,
+        "input_words": input_words,
+        "summary_words": summary_words,
+        "compression_ratio": round(compression_ratio, 2),
+        "chunks": len(chunks),
+        "error": None
+    }
+
+
+def summarize_user_upload(django_file, max_summary_words: int = 250):
+    """
+    Extracts text from uploaded file (PDF/DOCX/TXT) and generates summary safely.
+    """
+    try:
+        text = extract_text_from_upload(django_file)
+        text = (text or "").strip()
+    except Exception as e:
+        print(f"⚠️ Error extracting text: {e}")
+        return {
+            "summary": None,
+            "error": "Could not read the uploaded document. Please check the file format or encoding."
+        }
+
+    if not text:
+        return {
+            "summary": None,
+            "error": "The uploaded document is empty or unreadable."
+        }
+
+    # Optional pre-truncation to avoid model crashes
+    if len(text) > 25000:
+        text = text[:25000]
+        truncated = True
+    else:
+        truncated = False
+
+    result = summarize_text_local(text, max_summary_words=max_summary_words)
+
+    # Append truncation note if needed
+    if truncated and not result.get("error"):
+        result["note"] = "⚠️ Document was truncated to fit model limits (25K characters)."
+
+    return result
+
+
+# ========== Public service entry points ==========
+def summarize_user_text(text: str, max_summary_words: int = 250) -> dict:
+    """
+    Summarize raw text (no upload). Cached by hash to save time.
+    """
+    import hashlib
+    key = f"user_summary_text_{hashlib.md5((text + str(max_summary_words)).encode('utf-8')).hexdigest()}"
+    cached = cache.get(key)
+    if cached:
+        return {**cached, "cached": True}
+
+    result = summarize_text_local(text, max_summary_words=max_summary_words)
+    cache.set(key, result, 60 * 60 * 6)
+    return result
+
 

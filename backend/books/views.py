@@ -30,6 +30,11 @@ from .services import (
 from .permissions import IsOwnerOrReadOnly
 from .tasks import generate_summary_task
 
+from rest_framework.parsers import MultiPartParser, FormParser
+from .serializers import SummarizeTextSerializer, SummarizeUploadSerializer
+from .services import summarize_user_text, summarize_user_upload
+
+
 
 # ============================================================
 # 🧭 Unified Explore Endpoint (Search + Filter + Sort)
@@ -410,3 +415,40 @@ class BookDetailFullView(APIView):
             return Response(result, status=status.HTTP_404_NOT_FOUND)
         return Response(result, status=status.HTTP_200_OK)
 
+# books/views.py (add near bottom)
+class SummarizeTextView(APIView):
+    """
+    POST /api/v1/summarize/text/
+    Body: { "text": "...", "max_summary_words": 250 }
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = SummarizeTextSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        result = summarize_user_text(
+            text=data["text"],
+            max_summary_words=data.get("max_summary_words", 250)
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class SummarizeUploadView(APIView):
+    """
+    POST /api/v1/summarize/upload/
+    Form-Data: file=<PDF/DOCX/TXT>, max_summary_words=250
+    """
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        serializer = SummarizeUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = summarize_user_upload(
+            django_file=serializer.validated_data["file"],
+            max_summary_words=serializer.validated_data.get("max_summary_words", 250)
+        )
+        return Response(result, status=status.HTTP_200_OK)

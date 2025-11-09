@@ -16,6 +16,8 @@ from .views import (
     MoreFromAuthorView,
     UpdateReviewView,
     DeleteReviewView,
+    SummarizeTextView,
+    SummarizeUploadView,
 )
 
 urlpatterns = [
@@ -41,6 +43,10 @@ urlpatterns = [
     # Author-related endpoints
     path("author/<str:author_name>/", AuthorDetailView.as_view(), name="author-detail"),
     path("books/more-from-author/<str:author_name>/", MoreFromAuthorView.as_view(), name="more-from-author"),
+
+    path("summarize/text/", SummarizeTextView.as_view(), name="summarize-text"),
+    path("summarize/upload/", SummarizeUploadView.as_view(), name="summarize-upload"),
+
 
     path("debug/google-books/", GoogleBooksDebugView.as_view()),
 ]
